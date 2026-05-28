@@ -1,0 +1,6 @@
+[
+  {"project": "opsagent-prod",    "model": "gemini-3-flash-preview",  "location": "global"},
+  {"project": "opsagent-staging", "model": "gemini-2.5-flash",        "location": "us-central1"},
+  {"project": "opsagent-staging", "model": "gemini-2.5-flash-lite",   "location": "us-central1"},
+  {"project": "opsagent-staging", "model": "gemini-3-flash-preview",  "location": "global"}
+]
