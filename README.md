@@ -6,7 +6,7 @@ Triage parent: [Trello FpDfWEMH](https://trello.com/c/FpDfWEMH). Implementation 
 
 ## What it does
 
-For each `(project, model, location)` triple in [`slots.json`](./slots.json), POST a minimal `generateContent` call (`maxOutputTokens: 1`) to Vertex. HTTP 200 keeps the per-model 90-day activity counter alive; non-200 exits non-zero and trips a Cloud Monitoring alert + a Trello comment back to [FpDfWEMH](https://trello.com/c/FpDfWEMH).
+For each `(project, model, location)` triple in [`slots.json`](./slots.json), POST a minimal `generateContent` call (`maxOutputTokens: 1`) to Vertex. HTTP 200 keeps the per-model 90-day activity counter alive; non-200 (or a `requests` exception) is collected, the loop continues, and the job exits non-zero at the end if any slot failed — tripping a Cloud Monitoring alert + a Trello comment back to [FpDfWEMH](https://trello.com/c/FpDfWEMH).
 
 ## Dormant slots (kept warm by this job)
 
@@ -25,16 +25,36 @@ That model is served ONLY at `location=global` (us-central1 / us-east5 return 40
 
 ## Infra (one-time bootstrap, not in this repo)
 
+### Pre-flight verification
+
+Before running the bootstrap, confirm the opsagent-prod WIF pool's `github` provider maps `attribute.repository`. Without that attribute mapping, the per-repo principalSet binding below matches zero tokens and the GHA deploy will fail at the auth step:
+
+```bash
+gcloud iam workload-identity-pools providers describe github \
+  --workload-identity-pool=github --project=opsagent-prod --location=global \
+  --format='value(attributeMapping)'
+# Expect output to include: attribute.repository=assertion.repository
+```
+
+### Service account + roles
+
 ```bash
 gcloud iam service-accounts create vertex-keepalive-sa \
   --project=opsagent-prod --display-name="Vertex keepalive cron"
 
+# aiplatform.user on every project we keep alive
 for P in opsagent-prod opsagent-staging; do
   gcloud projects add-iam-policy-binding "$P" \
     --member="serviceAccount:vertex-keepalive-sa@opsagent-prod.iam.gserviceaccount.com" \
     --role="roles/aiplatform.user"
 done
 
+# run.invoker so Cloud Scheduler can POST to the Cloud Run Job execute endpoint
+gcloud projects add-iam-policy-binding opsagent-prod \
+  --member="serviceAccount:vertex-keepalive-sa@opsagent-prod.iam.gserviceaccount.com" \
+  --role="roles/run.invoker"
+
+# WIF binding so this repo's GHA can impersonate the SA without a JSON key
 gcloud iam service-accounts add-iam-policy-binding \
   vertex-keepalive-sa@opsagent-prod.iam.gserviceaccount.com \
   --role="roles/iam.workloadIdentityUser" \
@@ -47,14 +67,16 @@ gcloud iam service-accounts add-iam-policy-binding \
 gcloud scheduler jobs create http vertex-keepalive-trigger \
   --project=opsagent-prod --location=me-west1 \
   --schedule="0 3 1 */2 *" --time-zone="Asia/Jerusalem" \
-  --uri="https://me-west1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/opsagent-prod/jobs/vertex-keepalive:run" \
+  --uri="https://run.googleapis.com/v2/projects/opsagent-prod/locations/me-west1/jobs/vertex-keepalive:run" \
   --http-method=POST \
   --oauth-service-account-email=vertex-keepalive-sa@opsagent-prod.iam.gserviceaccount.com
 ```
 
 `0 3 1 */2 *` = 03:00 on the 1st of every other month → ~60-day cadence (mid-window inside the 90-day per-model expiry).
 
-## Add a new project to dhe rotation
+The v2 Cloud Run API path (`run.googleapis.com/v2/projects/.../locations/.../jobs/...:run`) is the current canonical surface; the deprecated v1 `namespaces`-based path still works today but is not the documented surface.
+
+## Add a new project to the rotation
 
 1. Append the new tuple to [`slots.json`](./slots.json) via PR.
 2. Grant `vertex-keepalive-sa@opsagent-prod` the `roles/aiplatform.user` role on the new project.
@@ -63,7 +85,7 @@ gcloud scheduler jobs create http vertex-keepalive-trigger \
 ## Local dry-run
 
 ```bash
-pip install google-auth requests
+pip install google-auth==2.38.0 requests==2.32.3
 gcloud auth application-default login
 SLOTS_FILE=slots.json python keepalive.py
 ```
