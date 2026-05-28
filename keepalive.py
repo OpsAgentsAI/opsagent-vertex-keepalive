@@ -29,10 +29,11 @@ def main() -> int:
         slots = json.load(fh)
 
     creds, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    failures: list[tuple[dict, int, str]] = []
+    creds.refresh(Request())
+    failures: list[tuple[dict, str]] = []
 
     for slot in slots:
-        creds.refresh(Request())
+        tag = f"{slot['project']} / {slot['model']} @ {slot['location']}"
         host = (
             "aiplatform.googleapis.com"
             if slot["location"] == "global"
@@ -42,29 +43,35 @@ def main() -> int:
             f"https://{host}/v1/projects/{slot['project']}/locations/"
             f"{slot['location']}/publishers/google/models/{slot['model']}:generateContent"
         )
-        res = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {creds.token}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-                "generationConfig": {"maxOutputTokens": 1},
-            },
-            timeout=30,
-        )
-        tag = f"{slot['project']} / {slot['model']} @ {slot['location']}"
+        try:
+            if not creds.valid:
+                creds.refresh(Request())
+            res = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {creds.token}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                    "generationConfig": {"maxOutputTokens": 1},
+                },
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            print(f"{tag} -> EXC {type(exc).__name__}: {exc}")
+            failures.append((slot, f"exception: {type(exc).__name__}: {exc}"))
+            continue
         print(f"{tag} -> {res.status_code}")
         if res.status_code != 200:
-            failures.append((slot, res.status_code, res.text[:500]))
+            failures.append((slot, f"HTTP {res.status_code}: {res.text[:500]}"))
 
     if failures:
-        print(f"\nFAILURES ({len(failures)}):", file=sys.stderr)
-        for slot, code, body in failures:
-            print(f"  {slot} -> HTTP {code}: {body}", file=sys.stderr)
+        print(f"\nFAILURES ({len(failures)} of {len(slots)}):", file=sys.stderr)
+        for slot, detail in failures:
+            print(f"  {slot} -> {detail}", file=sys.stderr)
         return 1
-    print("\nAll slots OK.")
+    print(f"\nAll {len(slots)} slots OK.")
     return 0
 
 
