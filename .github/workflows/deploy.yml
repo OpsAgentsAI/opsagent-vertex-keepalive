@@ -1,0 +1,38 @@
+name: Deploy vertex-keepalive
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/523955774086/locations/global/workloadIdentityPools/github/providers/github
+          service_account: vertex-keepalive-sa@opsagent-prod.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build + push image
+        run: |
+          IMAGE=me-west1-docker.pkg.dev/opsagent-prod/cron/vertex-keepalive:${GITHUB_SHA::7}
+          gcloud builds submit --tag "$IMAGE" --project=opsagent-prod --region=me-west1
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy Cloud Run Job
+        run: |
+          gcloud run jobs deploy vertex-keepalive \
+            --project=opsagent-prod --region=me-west1 \
+            --image="$IMAGE" \
+            --service-account=vertex-keepalive-sa@opsagent-prod.iam.gserviceaccount.com \
+            --max-retries=2 --task-timeout=300s
